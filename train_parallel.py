@@ -22,13 +22,17 @@ GAE_LAMBDA = 0.95
 
 PPO_EPOCHS = 4
 MINI_BATCH_SIZE = 256
-CLIP_EPS = 0.2
+CLIP_EPS = 0.15
 
-ACTOR_LR = 1e-4
-CRITIC_LR = 5e-4
+ACTOR_LR = 3e-4
+CRITIC_LR = 1e-3
 
 VALUE_COEF = 0.5
-ENTROPY_COEF = 0.02
+ENTROPY_COEF = 0.01
+
+#처음부터 학습할 때 최소 표준편차 유지를 위함(기존 모델에 이어서 학습하려면 제거)
+LOG_STD_MIN = -1.8
+LOG_STD_MAX = -0.3
 
 MODEL_PATH = "custom_ppo_line_tracing.pt"
 
@@ -328,6 +332,8 @@ def main():
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
                 optimizer.step()
+                with torch.no_grad():
+                    model.log_std.clamp_(LOG_STD_MIN, LOG_STD_MAX)
 
                 last_policy_loss = policy_loss.item()
                 last_value_loss = value_loss.item()

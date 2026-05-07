@@ -22,7 +22,9 @@ GAMMA = 0.99
 GAE_LAMBDA = 0.95
 CLIP_COEF = 0.2
 
-LR = 1e-4
+ACTOR_LR = 1e-4
+CRITIC_LR = 5e-4
+
 VALUE_COEF = 0.5
 ENTROPY_COEF = 0.001
 
@@ -71,8 +73,16 @@ def main():
     else:
         print("기존 모델 없음. 새 모델로 학습 시작")
 
-    optimizer = optim.Adam(model.parameters(), lr=LR)
-
+    optimizer = torch.optim.Adam([
+        {
+            "params": list(model.actor.parameters()) + [model.log_std],
+            "lr": ACTOR_LR,
+        },
+        {
+            "params": model.critic.parameters(),
+            "lr": CRITIC_LR,
+        },
+    ])
     global_step = 0
     episode_reward = 0
     episode_count = 1
@@ -160,6 +170,7 @@ def main():
                     f"Ep {episode_count} | "
                     f"Track {track_id} | "
                     f"Start {start_id} | "
+                    f"Orig {info.get('start_original_id', -1)} | "
                     f"Step {global_step} | "
                     f"Len {episode_length} | "
                     f"Reward {episode_reward:.1f} | "
@@ -305,7 +316,6 @@ def main():
             f"AbsSteer {avg_abs_steering:.3f} | "
             f"Std {current_std}"
             f"Start {start_id} | "
-            f"Orig {info.get('start_original_id')} | "
         )
 
     torch.save(model.state_dict(), MODEL_PATH)

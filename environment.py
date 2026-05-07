@@ -46,14 +46,21 @@ class LineTracingCameraEnv(gym.Env):
         # =========================
         self.closed_track = True
 
-        self.num_tracks = 4
-        self.track_id = np.random.randint(self.num_tracks)
+        self.available_tracks = [0, 1, 2, 3]
+        self.num_tracks = len(self.available_tracks)
+
+        self.track_id = np.random.choice(self.available_tracks)
 
         self.track_points = self.build_bezier_track(self.track_id)
 
-        all_start_points = self.generate_start_points_by_interval(interval=30)
+        all_start_points = self.generate_start_points_by_interval(interval=20)
 
-        bad_start_ids = set()
+        # track별로 제외할 start 지정
+        bad_start_ids_by_track = {
+            1: {5},   # Track 1의 Start 5 제외
+        }
+
+        bad_start_ids = bad_start_ids_by_track.get(self.track_id, set())
 
         self.start_points = [
             point for i, point in enumerate(all_start_points)
@@ -222,12 +229,16 @@ class LineTracingCameraEnv(gym.Env):
         super().reset(seed=seed)
 
         # 매 에피소드마다 트랙 랜덤 선택
-        self.track_id = np.random.randint(self.num_tracks)
+        self.track_id = np.random.choice(self.available_tracks)
         self.track_points = self.build_bezier_track(self.track_id)
 
-        all_start_points = self.generate_start_points_by_interval(interval=30)
+        all_start_points = self.generate_start_points_by_interval(interval=20)
 
-        bad_start_ids = set()
+        bad_start_ids_by_track = {
+            1: {5},   # Track 1의 원래 Start 5 제외
+        }
+
+        bad_start_ids = bad_start_ids_by_track.get(self.track_id, set())
 
         self.start_points = [
             point for i, point in enumerate(all_start_points)
