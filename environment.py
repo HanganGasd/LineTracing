@@ -8,7 +8,7 @@ from gymnasium import spaces
 
 class LineTracingCameraEnv(gym.Env):
 
-    def __init__(self):
+    def __init__(self, render_mode=False):
         super().__init__()
         pygame.init()
         self.low_speed_count = 0
@@ -20,8 +20,13 @@ class LineTracingCameraEnv(gym.Env):
         # =========================
         self.width = 900
         self.height = 600
-        self.screen = pygame.display.set_mode((self.width, self.height))
-        pygame.display.set_caption("Line Tracing Camera Environment")
+        self.render_mode = render_mode
+
+        if self.render_mode:
+            self.screen = pygame.display.set_mode((self.width, self.height))
+            pygame.display.set_caption("Line Tracing Camera Environment")
+        else:
+            self.screen = pygame.Surface((self.width, self.height))
 
         self.clock = pygame.time.Clock()
 
@@ -777,8 +782,8 @@ class LineTracingCameraEnv(gym.Env):
             (int(camera_x), int(camera_y)),
             5
         )
-
-        pygame.display.update()
+        if(self.render_mode):
+            pygame.display.update()
 
     def close(self):
         pygame.quit()
