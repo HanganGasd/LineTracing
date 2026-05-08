@@ -138,6 +138,8 @@ def main():
         print(f"기존 모델 불러옴: {MODEL_PATH}")
     except FileNotFoundError:
         print("기존 모델 없음. 새 모델로 시작.")
+    
+    print(f"Device: {DEVICE} | ObsDim: {obs_dim} | ActionDim: {action_dim}")
 
     recent_lengths = deque(maxlen=20)
     recent_rewards = deque(maxlen=20)

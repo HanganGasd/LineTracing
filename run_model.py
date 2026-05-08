@@ -4,10 +4,10 @@ from environment import LineTracingCameraEnv
 
 def main():
     # 환경 생성
-    env = LineTracingCameraEnv()
+    env = LineTracingCameraEnv(render_mode=True)
 
     # 학습된 PPO 모델 불러오기
-    model = PPO.load("ppo_line_tracing")
+    model = PPO.load("ppo_line_tracing_new")
 
     # 환경 초기화
     obs, info = env.reset()
