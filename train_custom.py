@@ -13,8 +13,8 @@ from custom_ppo import ActorCritic
 # =========================
 # 하이퍼파라미터
 # =========================
-TOTAL_TIMESTEPS = 100_000
-ROLLOUT_STEPS = 2048
+TOTAL_TIMESTEPS = 200_000
+ROLLOUT_STEPS = 4096
 UPDATE_EPOCHS = 10
 MINIBATCH_SIZE = 64
 
@@ -22,15 +22,15 @@ GAMMA = 0.99
 GAE_LAMBDA = 0.95
 CLIP_COEF = 0.2
 
-ACTOR_LR = 1e-4
+ACTOR_LR = 2e-4
 CRITIC_LR = 5e-4
 
 VALUE_COEF = 0.5
-ENTROPY_COEF = 0.001
+ENTROPY_COEF = 0.01
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 
-MODEL_PATH = "custom_ppo_line_tracing.pt"
+MODEL_PATH = "custom_ppo_lane_keeping.pt"
 
 
 def compute_gae(rewards, values, dones, next_value):
@@ -72,6 +72,11 @@ def main():
         print(f"기존 모델 불러옴: {MODEL_PATH}")
     else:
         print("기존 모델 없음. 새 모델로 학습 시작")
+
+    if torch.cuda.is_available():
+        print("GPU")
+    else:
+        print("CPU")
 
     optimizer = torch.optim.Adam([
         {
@@ -176,7 +181,8 @@ def main():
                     f"Reward {episode_reward:.1f} | "
                     f"AvgLen20 {avg_length:.1f} | "
                     f"Reason {done_reason} | "
-                    f"Dist {total_distance:.0f}"
+                    f"Dist {total_distance:.0f} | "
+                    f"ValidRows {info.get('valid_lane_rows', -1)} | "
                 )
 
                 if episode_count % 100 == 0:
@@ -280,6 +286,9 @@ def main():
                 torch.nn.utils.clip_grad_norm_(model.parameters(), 0.5)
                 optimizer.step()
 
+                with torch.no_grad():
+                    model.log_std.clamp_(-1.5, -0.3)
+
                 last_policy_loss = policy_loss.item()
                 last_value_loss = value_loss.item()
                 last_entropy = entropy_loss.item()
@@ -314,9 +323,13 @@ def main():
             f"Entropy {entropy_loss.item():.3f} | "
             f"Throttle {avg_throttle:.3f} | "
             f"AbsSteer {avg_abs_steering:.3f} | "
-            f"Std {current_std}"
+            f"Std {current_std} | "
             f"Start {start_id} | "
         )
+
+        if global_step % 10_000 < ROLLOUT_STEPS:
+            torch.save(model.state_dict(), MODEL_PATH)
+            print(f"모델 중간 저장: {MODEL_PATH}")
 
     torch.save(model.state_dict(), MODEL_PATH)
     print(f"직접 구현한 PPO 모델 저장 완료: {MODEL_PATH}")

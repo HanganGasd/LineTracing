@@ -1,8 +1,8 @@
 import pygame
 import numpy as np
 import math
-import cv2
 import gymnasium as gym
+import cv2
 from gymnasium import spaces
 
 
@@ -13,7 +13,9 @@ class LineTracingCameraEnv(gym.Env):
         pygame.init()
         self.low_speed_count = 0
         self.prev_steering = 0.0
-                # =========================
+        self.road_width = 90
+        self.lane_line_width = 5
+        self.lane_lost_count = 0
         
         # =========================
         # 화면 설정
@@ -46,7 +48,7 @@ class LineTracingCameraEnv(gym.Env):
         # =========================
         self.closed_track = True
 
-        self.available_tracks = [0, 1, 2, 3]
+        self.available_tracks = [0]
         self.num_tracks = len(self.available_tracks)
 
         self.track_id = np.random.choice(self.available_tracks)
@@ -57,7 +59,7 @@ class LineTracingCameraEnv(gym.Env):
 
         # track별로 제외할 start 지정
         bad_start_ids_by_track = {
-            1: {5},   # Track 1의 Start 5 제외
+            0:{1,2,3,7},
         }
 
         bad_start_ids = bad_start_ids_by_track.get(self.track_id, set())
@@ -71,6 +73,9 @@ class LineTracingCameraEnv(gym.Env):
             i for i, point in enumerate(all_start_points)
             if i not in bad_start_ids
         ]
+
+        self.track_points = self.build_bezier_track(self.track_id)
+        self.left_lane_points, self.right_lane_points = self.build_lane_lines()
 
         # 현재 속도
         self.current_speed = 0.0
@@ -87,10 +92,10 @@ class LineTracingCameraEnv(gym.Env):
     # throttle: -1.0 ~ 1.0
 
     # 초당 최대 회전 각도
-        self.max_turn_rate = 60.0  # degree per second
+        self.max_turn_rate = 40.0  # degree per second
 
     # 초당 최대 이동 속도
-        self.max_speed = 60.0  # pixel per second
+        self.max_speed = 50.0  # pixel per second
         # =========================
         # 카메라 설정
         # =========================
@@ -99,19 +104,22 @@ class LineTracingCameraEnv(gym.Env):
         self.camera_height = 120
 
         # 자동차 앞쪽 몇 px 떨어진 지점을 카메라 중심으로 볼 것인지
-        self.camera_distance = 60
+        self.camera_distance = 90
 
         # 카메라 관찰값을 몇 칸으로 나눌 것인지
         # 예: 16칸이면 화면 가로를 16등분해서 각 칸에 선이 있는지 확인
-        self.observation_bins = 16
+        self.observation_bins = 12
         self.observation_rows = 3
 
         # Gymnasium space 설정
         # =========================
+
+        self.lane_scan_rows = 16
+
         self.observation_space = spaces.Box(
             low=-1.0,
             high=1.0,
-            shape=(self.observation_bins * self.observation_rows + self.observation_rows + 2,),
+            shape=(self.lane_scan_rows * 2 + 2,),
             dtype=np.float32
         )
 
@@ -126,11 +134,100 @@ class LineTracingCameraEnv(gym.Env):
         # 에피소드 설정
         # =========================
         self.step_count = 0
-        self.max_steps = 2000
+        self.max_steps = 4000
         self.target_steps = 500
 
         # 처음 화면 준비
         self.reset()
+
+    def get_camera_image_with_angle_sign(self, sign):
+        camera_x, camera_y = self.get_camera_center()
+
+        screen_array = pygame.surfarray.array3d(self.screen)
+        screen_array = np.transpose(screen_array, (1, 0, 2))
+
+        angle = sign * self.car_angle
+
+        M = cv2.getRotationMatrix2D(
+            (camera_x, camera_y),
+            angle,
+            1.0
+        )
+
+        M[0, 2] += self.camera_width / 2 - camera_x
+        M[1, 2] += self.camera_height / 2 - camera_y
+
+        camera_image = cv2.warpAffine(
+            screen_array,
+            M,
+            (self.camera_width, self.camera_height),
+            flags=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=self.WHITE
+        )
+
+        return camera_image
+
+
+    def debug_camera_sign_score(self):
+        img_minus = self.get_camera_image_with_angle_sign(-1)
+        obs_minus = self.get_lane_observation_from_camera(img_minus)
+        valid_minus = int(np.sum(obs_minus[1::2] > 0.01))
+
+        img_plus = self.get_camera_image_with_angle_sign(1)
+        obs_plus = self.get_lane_observation_from_camera(img_plus)
+        valid_plus = int(np.sum(obs_plus[1::2] > 0.01))
+
+        print(
+            f"[Camera Debug] "
+            f"angle=-car_angle ValidRows={valid_minus} | "
+            f"angle=+car_angle ValidRows={valid_plus}"
+        )
+
+    def build_lane_lines(self):
+        """
+        track_points를 중심 경로로 보고,
+        좌우 차선 점들을 생성한다.
+        """
+        left_points = []
+        right_points = []
+
+        n = len(self.track_points)
+        half_width = self.road_width / 2
+
+        for i in range(n):
+            prev_p = self.track_points[i - 1]
+            next_p = self.track_points[(i + 1) % n]
+
+            dx = next_p[0] - prev_p[0]
+            dy = next_p[1] - prev_p[1]
+
+            length = math.sqrt(dx * dx + dy * dy)
+            if length == 0:
+                left_points.append(self.track_points[i])
+                right_points.append(self.track_points[i])
+                continue
+
+            # 진행 방향의 단위 벡터
+            tx = dx / length
+            ty = dy / length
+
+            # 진행 방향에 수직인 법선 벡터
+            nx = -ty
+            ny = tx
+
+            cx, cy = self.track_points[i]
+
+            left_x = cx + nx * half_width
+            left_y = cy + ny * half_width
+
+            right_x = cx - nx * half_width
+            right_y = cy - ny * half_width
+
+            left_points.append((int(left_x), int(left_y)))
+            right_points.append((int(right_x), int(right_y)))
+
+        return left_points, right_points
 
     def cubic_bezier(self, p0, p1, p2, p3, num_points=30):
         """
@@ -231,11 +328,13 @@ class LineTracingCameraEnv(gym.Env):
         # 매 에피소드마다 트랙 랜덤 선택
         self.track_id = np.random.choice(self.available_tracks)
         self.track_points = self.build_bezier_track(self.track_id)
+        self.lane_lost_count = 0
+        self.last_step_distance = 0.0
 
         all_start_points = self.generate_start_points_by_interval(interval=20)
 
         bad_start_ids_by_track = {
-            1: {5},   # Track 1의 원래 Start 5 제외
+            0: {0,2,3,7},   # Track 1의 원래 Start 5 제외
         }
 
         bad_start_ids = bad_start_ids_by_track.get(self.track_id, set())
@@ -256,8 +355,15 @@ class LineTracingCameraEnv(gym.Env):
         self.step_count = 0
 
         # 시작점 하나만 랜덤 선택
-        self.start_id = np.random.randint(len(self.start_points))
+        if self.track_id == 0 and 8 in self.start_original_ids and np.random.rand() < 0.3:
+            self.start_id = self.start_original_ids.index(8)
+        else:
+            self.start_id = np.random.randint(len(self.start_points))
+
         self.start_original_id = self.start_original_ids[self.start_id]
+        self.start_original_id = self.start_original_ids[self.start_id]
+
+        self.left_lane_points, self.right_lane_points = self.build_lane_lines()
 
         start_x, start_y, start_angle = self.start_points[self.start_id]
 
@@ -277,6 +383,8 @@ class LineTracingCameraEnv(gym.Env):
         self.draw_track()
 
         observation = self.get_observation()
+        self.last_lane_observation = observation
+
         info = {
             "start_id": self.start_id,
             "start_original_id": self.start_original_id,
@@ -313,7 +421,8 @@ class LineTracingCameraEnv(gym.Env):
 
         for i in range(0, n, interval):
             p1 = self.track_points[i]
-            p2 = self.track_points[(i + 1) % n]
+            lookahead = 5
+            p2 = self.track_points[(i + lookahead) % n]
 
             x1, y1 = p1
             x2, y2 = p2
@@ -359,18 +468,49 @@ class LineTracingCameraEnv(gym.Env):
         return start_points
 
     def draw_track(self):
+    # 배경
+        self.screen.fill(self.WHITE)
+
+        # 도로 영역: 어두운 회색으로 넓게 그림
         pygame.draw.lines(
             self.screen,
-            self.BLACK,
+            (60, 60, 60),
             self.closed_track,
             self.track_points,
-            35
+            self.road_width
         )
 
+        # 왼쪽 차선
+        pygame.draw.lines(
+            self.screen,
+            (255, 255, 0),
+            self.closed_track,
+            self.left_lane_points,
+            self.lane_line_width
+        )
+
+        # 오른쪽 차선
+        pygame.draw.lines(
+            self.screen,
+            (255, 255, 0),
+            self.closed_track,
+            self.right_lane_points,
+            self.lane_line_width
+        )
+
+    def save_debug_camera_image(self, filename="debug_camera.png"):
+        camera_image = self.get_camera_image()
+
+        import cv2
+        camera_bgr = cv2.cvtColor(camera_image, cv2.COLOR_RGB2BGR)
+        cv2.imwrite(filename, camera_bgr)
+
+        obs = self.get_lane_observation_from_camera(camera_image)
+        valid_rows = int(np.sum(obs[1::2] > 0.01))
+
+        print(f"[Camera Debug] saved={filename}, valid_rows={valid_rows}")
+
     def get_camera_center(self):
-        """
-        자동차 앞쪽에 있는 가상의 카메라 중심 좌표를 계산
-        """
         rad = math.radians(self.car_angle)
 
         camera_x = self.car_x + math.cos(rad) * self.camera_distance
@@ -380,177 +520,165 @@ class LineTracingCameraEnv(gym.Env):
 
     def get_camera_image(self):
         """
-        자동차 앞쪽 카메라가 보는 이미지를 가져옴.
-
-        실제 라즈베리파이에서는 여기 부분이
-        picamera2 또는 cv2.VideoCapture로 바뀜.
-
-        지금은 pygame 화면에서 자동차 앞쪽 영역을 잘라서
-        카메라 이미지처럼 사용함.
+        차량 기준 전방 카메라 이미지 생성.
+        화면 전체를 회전 crop하지 않고,
+        차량의 진행 방향 기준으로 앞쪽 영역만 샘플링한다.
         """
 
-        camera_x, camera_y = self.get_camera_center()
+        # pygame 화면 -> numpy [H, W, C]
+        screen_array = pygame.surfarray.array3d(self.screen)
+        screen_array = np.transpose(screen_array, (1, 0, 2))
 
-        left = int(camera_x - self.camera_width / 2)
-        top = int(camera_y - self.camera_height / 2)
+        h = self.camera_height
+        w = self.camera_width
 
-        # 화면 범위 밖으로 나가지 않도록 제한
-        left = max(0, min(left, self.width - self.camera_width))
-        top = max(0, min(top, self.height - self.camera_height))
+        rad = math.radians(self.car_angle)
 
-        # pygame Surface에서 카메라 영역 잘라내기
-        camera_rect = pygame.Rect(
-            left,
-            top,
-            self.camera_width,
-            self.camera_height
+        # 차량 진행 방향 벡터
+        forward_x = math.cos(rad)
+        forward_y = math.sin(rad)
+
+        # 차량 오른쪽 방향 벡터
+        right_x = -math.sin(rad)
+        right_y = math.cos(rad)
+
+        # 카메라가 볼 범위
+        near_dist = 20.0
+        far_dist = 190.0
+        view_width = 180.0
+
+        # 이미지 좌표 만들기
+        xs = np.linspace(-view_width / 2, view_width / 2, w)
+
+        # 이미지 위쪽이 먼 곳, 아래쪽이 가까운 곳
+        ys = np.linspace(far_dist, near_dist, h)
+
+        local_x, local_y = np.meshgrid(xs, ys)
+
+        # 차량 기준 local 좌표 -> 월드 좌표
+        map_x = (
+            self.car_x
+            + forward_x * local_y
+            + right_x * local_x
+        ).astype(np.float32)
+
+        map_y = (
+            self.car_y
+            + forward_y * local_y
+            + right_y * local_x
+        ).astype(np.float32)
+
+        camera_image = cv2.remap(
+            screen_array,
+            map_x,
+            map_y,
+            interpolation=cv2.INTER_NEAREST,
+            borderMode=cv2.BORDER_CONSTANT,
+            borderValue=self.WHITE
         )
 
-        camera_surface = self.screen.subsurface(camera_rect).copy()
+        return camera_image
 
-        # pygame Surface -> numpy array
-        camera_array = pygame.surfarray.array3d(camera_surface)
-
-        # pygame은 (width, height, color) 형태라서
-        # OpenCV에서 쓰기 좋게 (height, width, color)로 바꿈
-        camera_array = np.transpose(camera_array, (1, 0, 2))
-
-        return camera_array
-
-    def preprocess_camera_image(self, image):
+    def get_lane_observation_from_camera(self, image):
         """
-        카메라 이미지에서 검은 선만 추출함.
-
-        실제 카메라에서도 비슷하게 처리함:
-        1. RGB 이미지를 grayscale로 변환
-        2. 검은색 라인만 threshold로 분리
+        카메라 numpy 이미지에서 왼쪽/오른쪽 차선을 감지하고,
+        각 scan line마다 차선 중앙 오차를 observation으로 만든다.
         """
 
-        # RGB -> Grayscale
-        gray = cv2.cvtColor(image, cv2.COLOR_RGB2GRAY)
+        img = image  # 이미 [H, W, C] numpy array
 
-        # 검은색 선 검출
-        # gray 값이 80보다 작으면 검은 선이라고 판단
-        _, binary = cv2.threshold(
-            gray,
-            80,
-            255,
-            cv2.THRESH_BINARY_INV
+        h, w, _ = img.shape
+        camera_center_x = w / 2
+
+        # 노란색 차선 감지
+        lane_mask = (
+            (img[:, :, 0] > 160) &
+            (img[:, :, 1] > 130) &
+            (img[:, :, 2] < 180)
         )
 
-        return binary
+        scan_ys = np.linspace(
+            int(h * 0.15),
+            int(h * 0.95),
+            self.lane_scan_rows
+        ).astype(int)
+
+        observations = []
+
+        for y in scan_ys:
+            xs = np.where(lane_mask[y])[0]
+
+            if len(xs) < 2:
+                observations.append(0.0)  # center_error
+                observations.append(0.0)  # confidence
+                continue
+
+            left_candidates = xs[xs < camera_center_x]
+            right_candidates = xs[xs > camera_center_x]
+
+            if len(left_candidates) == 0 or len(right_candidates) == 0:
+                observations.append(0.0)
+                observations.append(0.0)
+                continue
+
+            # 왼쪽 차선은 왼쪽 후보들의 평균보다 max가 더 안정적일 때가 많음
+            left_x = np.mean(left_candidates)
+            right_x = np.mean(right_candidates)
+
+            lane_center_x = (left_x + right_x) / 2
+            lane_width_px = right_x - left_x
+
+            center_error = (lane_center_x - camera_center_x) / (w / 2)
+
+            # confidence는 차선 폭이 정상적으로 보이면 1에 가깝게
+            lane_width_norm = lane_width_px / w
+            confidence = np.clip(lane_width_norm, 0.0, 1.0)
+
+            observations.append(center_error)
+            observations.append(confidence)
+
+        return np.array(observations, dtype=np.float32)
 
     def get_observation(self):
         camera_image = self.get_camera_image()
-        binary = self.preprocess_camera_image(camera_image)
+        lane_obs = self.get_lane_observation_from_camera(camera_image)
 
-        h, w = binary.shape
+        extra_obs = np.array([
+            self.prev_steering,
+            self.current_speed / max(self.max_speed, 1e-6)
+        ], dtype=np.float32)
 
-        bin_width = w // self.observation_bins
-        row_height = h // self.observation_rows
+        observation = np.concatenate([lane_obs, extra_obs]).astype(np.float32)
 
-        observation = []
-        row_centers = []
+        return observation
 
-        for row in range(self.observation_rows):
-            start_y = row * row_height
+    def is_off_road_by_lane_detection(self):
+        lane_obs_len = self.lane_scan_rows * 2
+        obs = self.last_lane_observation[:lane_obs_len]
 
-            if row == self.observation_rows - 1:
-                end_y = h
-            else:
-                end_y = (row + 1) * row_height
+        center_errors = obs[0::2]
+        confidences = obs[1::2]
 
-            row_binary = binary[start_y:end_y, :]
+        valid = confidences > 0.01
 
-            # =========================
-            # 1. row별 선 중심 위치 추가
-            # =========================
-            ys, xs = np.where(row_binary > 0)
+        if np.sum(valid) == 0:
+            self.lane_lost_count += 1
+        else:
+            self.lane_lost_count = 0
 
-            if len(xs) == 0:
-                # 해당 row에서 선을 못 찾으면 0으로 둠
-                # 0은 중앙이라는 의미라 완벽하진 않지만,
-                # 일단 학습 안정성을 위해 큰 이상값은 피함
-                row_center = 0.0
-            else:
-                line_center_x = np.mean(xs)
+        # 차선을 15 step 연속 못 볼 때만 종료
+        lost_limit = 60
 
-                # -1에 가까움: 왼쪽
-                #  0에 가까움: 중앙
-                #  1에 가까움: 오른쪽
-                row_center = (line_center_x - w / 2) / (w / 2)
+        if self.track_id == 0 and self.start_original_id == 8:
+            lost_limit = 80
 
-            row_centers.append(row_center)
-
-            # =========================
-            # 2. 기존 bin별 검은 픽셀 비율
-            # =========================
-            for i in range(self.observation_bins):
-                start_x = i * bin_width
-
-                if i == self.observation_bins - 1:
-                    end_x = w
-                else:
-                    end_x = (i + 1) * bin_width
-
-                roi = binary[start_y:end_y, start_x:end_x]
-
-                black_ratio = np.sum(roi > 0) / roi.size
-                observation.append(black_ratio)
-
-        # row별 중심 위치 3개 추가
-        observation.extend(row_centers)
-
-        angle_normalized = ((self.car_angle + 180) % 360 - 180) / 180.0
-        speed_norm = self.current_speed / self.max_speed
-
-        observation.append(angle_normalized)
-        observation.append(speed_norm)
-
-        return np.array(observation, dtype=np.float32)
-
-    def calculate_line_position(self):
-        """
-        카메라 이미지 안에서 선이 어느 쪽에 있는지 계산.
-
-        -1에 가까움: 왼쪽에 선이 있음
-         0에 가까움: 중앙에 선이 있음
-         1에 가까움: 오른쪽에 선이 있음
-
-        이 값은 사람이 직접 제어에 쓰는 게 아니라,
-        reward 계산용으로만 사용함.
-        """
-
-        camera_image = self.get_camera_image()
-        binary = self.preprocess_camera_image(camera_image)
-
-        h, w = binary.shape
-
-        ys, xs = np.where(binary > 0)
-
-        # 선을 못 찾은 경우
-        if len(xs) == 0:
-            return None
-
-        line_center_x = np.mean(xs)
-
-        # 화면 중앙 기준으로 정규화
-        normalized_position = (line_center_x - w / 2) / (w / 2)
-
-        return normalized_position
-
-    def is_off_track(self):
-        """
-        카메라에서 검은 선이 거의 안 보이면 트랙을 놓쳤다고 판단
-        """
-
-        camera_image = self.get_camera_image()
-        binary = self.preprocess_camera_image(camera_image)
-
-        black_ratio = np.sum(binary > 0) / binary.size
-
-        if black_ratio < 0.03:
+        if self.lane_lost_count >= lost_limit:
             return True
+        
+        if np.any(valid):
+            mean_abs_error = np.mean(np.abs(center_errors[valid]))
+            if mean_abs_error > 1.2:
+                return True
 
         return False
 
@@ -599,6 +727,8 @@ class LineTracingCameraEnv(gym.Env):
             (self.car_y - self.prev_y) ** 2
         )
 
+        self.last_step_distance = step_distance
+
         self.total_distance += step_distance
         self.prev_x = self.car_x
         self.prev_y = self.car_y
@@ -609,9 +739,16 @@ class LineTracingCameraEnv(gym.Env):
 
         # observation 계산
         observation = self.get_observation()
+        self.last_lane_observation = observation
 
         # reward 계산
         reward = self.calculate_reward(steering, throttle)
+
+        #lane 관련
+        lane_obs_len = self.lane_scan_rows * 2
+        lane_obs = self.last_lane_observation[:lane_obs_len]
+        confidences = lane_obs[1::2]
+        valid_count = int(np.sum(confidences > 0.01))
 
         # 다음 reward 계산을 위해 저장
         self.prev_steering = steering
@@ -621,7 +758,7 @@ class LineTracingCameraEnv(gym.Env):
         truncated = False
         done_reason = "none"
 
-        finish_line_x = 830.0
+        #finish_line_x = 830.0
 
         # 1. finish는 off_track보다 먼저 검사
         #if self.car_x >= finish_line_x:
@@ -636,15 +773,10 @@ class LineTracingCameraEnv(gym.Env):
             done_reason = "low_speed"
 
         # 3. 선 이탈 종료
-        elif self.is_off_track():
+        elif self.is_off_road_by_lane_detection():
             terminated = True
-
-            progress_ratio = min(self.step_count / self.target_steps, 1.0)
-            early_fail_penalty = 3.0 * (1.0 - progress_ratio)
-
-            reward -= 6.0
-            reward -= early_fail_penalty
-            done_reason = "off_track"
+            reward -= 25.0
+            done_reason = "off_road"
 
         # 4. 화면 밖 종료
         elif self.car_x < 0 or self.car_x > self.width:
@@ -680,57 +812,54 @@ class LineTracingCameraEnv(gym.Env):
             "total_distance": self.total_distance,
             "start_original_id": self.start_original_id,
             "track_id": self.track_id,
+            "valid_lane_rows": valid_count,
         }
 
         return observation, reward, terminated, truncated, info
 
     def calculate_reward(self, steering, throttle):
-        line_position = self.calculate_line_position()
+        lane_obs_len = self.lane_scan_rows * 2
+        obs = self.last_lane_observation[:lane_obs_len]
 
-        if line_position is None:
-            return -2.0
+        center_errors = obs[0::2]
+        confidences = obs[1::2]
 
-        center_error = abs(line_position)
-        center_reward = 1.0 - center_error
+        valid = confidences > 0.01
+        valid_count = int(np.sum(valid))
+        valid_ratio = valid_count / len(confidences)
+
+        # 차선을 하나도 못 보면 손해
+        if valid_count == 0:
+            reward = -0.8
+            reward -= throttle * 0.2
+            reward -= min(self.lane_lost_count * 0.03, 0.8)
+            return reward
+
+        valid_errors = center_errors[valid]
+        mean_abs_error = np.mean(np.abs(valid_errors))
+
+        center_score = 1.0 - np.clip(mean_abs_error, 0.0, 1.0)
 
         reward = 0.0
 
-         # 선이 중앙에서 많이 벗어난 상태에서 너무 빠르면 벌점
-        if center_error > 0.35 and throttle > 0.6:
-            reward -= (throttle - 0.6) * 1.5
+        # 1. 차선을 많이 볼수록 보상
+        reward += valid_ratio * 1.0
 
-        # 선이 화면 끝쪽이면 더 강하게 속도 벌점
-        if center_error > 0.6 and throttle > 0.5:
-            reward -= (throttle - 0.5) * 2.0
+        # 2. 차선 중앙에 가까울수록 보상
+        reward += center_score * 0.8
 
-        # 많이 꺾는 중인데 속도가 높으면 벌점
-        if abs(steering) > 0.3 and throttle > 0.65:
-            reward -= (throttle - 0.65) * abs(steering) * 2.0
+        # 3. 차선을 어느 정도 보고 있을 때만 속도 보상
+        if valid_count >= 3 and mean_abs_error < 0.5:
+            reward += throttle * 0.25
+        else:
+            reward -= throttle * 0.15
 
-        # 1. 핵심: 선 중앙 + 전진
-        target_throttle = 0.55 + 0.25 * center_reward
-        speed_score = 1.0 - abs(throttle - target_throttle)
+        # 4. 과도한 조향만 살짝 패널티
+        reward -= abs(steering) * 0.08
 
-        reward += center_reward * max(speed_score, 0.0) * 1.2
-
-        # 2. 너무 느린 행동 방지
-        if throttle < 0.1:
-            reward -= 0.8
-        elif throttle < 0.25:
-            reward -= 0.2
-
-        # 3. 선이 너무 가장자리면 명확한 벌점
-        if center_error > 0.6:
-            reward -= 0.8
-
-        # 4. 조향 벌점은 약하게
-        reward -= abs(steering) * 0.04
-
-        steering_change = abs(steering - self.prev_steering)
-        reward -= steering_change * 0.02
-
-        # 5. 생존 보상은 작게, throttle과 묶기
-        #reward += 0.03 * throttle
+        # 5. 조향 변화 패널티도 약하게
+        steer_change = abs(steering - self.prev_steering)
+        reward -= steer_change * 0.05
 
         return reward
 
@@ -779,21 +908,10 @@ class LineTracingCameraEnv(gym.Env):
             self.camera_height
         )
 
-        pygame.draw.rect(
-            self.screen,
-            self.GREEN,
-            camera_rect,
-            2
-        )
+        pygame.draw.rect(self.screen, self.GREEN, camera_rect, 2)
+        pygame.draw.circle(self.screen, self.YELLOW, (int(camera_x), int(camera_y)), 4)
 
-        # 카메라 중심점 표시
-        pygame.draw.circle(
-            self.screen,
-            self.YELLOW,
-            (int(camera_x), int(camera_y)),
-            5
-        )
-        if(self.render_mode):
+        if self.render_mode:
             pygame.display.update()
 
     def close(self):

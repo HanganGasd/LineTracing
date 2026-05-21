@@ -24,8 +24,8 @@ PPO_EPOCHS = 4
 MINI_BATCH_SIZE = 256
 CLIP_EPS = 0.15
 
-ACTOR_LR = 3e-4
-CRITIC_LR = 1e-3
+ACTOR_LR = 2e-4
+CRITIC_LR = 5e-4
 
 VALUE_COEF = 0.5
 ENTROPY_COEF = 0.01
@@ -34,7 +34,7 @@ ENTROPY_COEF = 0.01
 LOG_STD_MIN = -1.8
 LOG_STD_MAX = -0.3
 
-MODEL_PATH = "custom_ppo_line_tracing.pt"
+MODEL_PATH = "custom_ppo_lane_keeping.pt"
 
 def get_action_and_value(model, obs_tensor):
     """

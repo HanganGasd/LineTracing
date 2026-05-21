@@ -7,7 +7,7 @@ from custom_ppo import ActorCritic
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-MODEL_PATH = "custom_ppo_line_tracing.pt"
+MODEL_PATH = "custom_ppo_lane_keeping.pt"
 
 
 def main():
