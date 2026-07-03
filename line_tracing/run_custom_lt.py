@@ -3,15 +3,15 @@ import torch
 import numpy as np
 
 from environment import LineTracingCameraEnv
-from custom_ppo import ActorCritic
+from lt_ppo import ActorCritic
 
 
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-MODEL_PATH = "custom_ppo_lane_keeping.pt"
+MODEL_PATH = "custom_ppo_line_tracing.pt"
 
 
 def main():
-    env = LineTracingCameraEnv()
+    env = LineTracingCameraEnv(render_mode=True)
 
     obs_dim = env.observation_space.shape[0]
     action_dim = env.action_space.shape[0]

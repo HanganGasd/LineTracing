@@ -8,7 +8,7 @@ from gymnasium import spaces
 
 class LineTracingCameraEnv(gym.Env):
 
-    def __init__(self, render_mode=False):
+    def __init__(self, render_mode=True):
         super().__init__()
         pygame.init()
         self.low_speed_count = 0
@@ -59,7 +59,7 @@ class LineTracingCameraEnv(gym.Env):
 
         # track별로 제외할 start 지정
         bad_start_ids_by_track = {
-            0:{1,2,3,7},
+           
         }
 
         bad_start_ids = bad_start_ids_by_track.get(self.track_id, set())
@@ -92,10 +92,10 @@ class LineTracingCameraEnv(gym.Env):
     # throttle: -1.0 ~ 1.0
 
     # 초당 최대 회전 각도
-        self.max_turn_rate = 40.0  # degree per second
+        self.max_turn_rate = 60.0  # degree per second
 
     # 초당 최대 이동 속도
-        self.max_speed = 50.0  # pixel per second
+        self.max_speed = 60.0  # pixel per second
         # =========================
         # 카메라 설정
         # =========================
@@ -136,6 +136,17 @@ class LineTracingCameraEnv(gym.Env):
         self.step_count = 0
         self.max_steps = 4000
         self.target_steps = 500
+
+                # =========================
+        # 진행도 / 완주 계산용
+        # =========================
+        self.track_cumulative_lengths = None
+        self.track_length = 1.0
+        self.prev_track_progress = 0.0
+        self.start_progress = 0.0
+        self.lap_progress = 0.0
+        self.last_progress_delta = 0.0
+        self.dist_to_center = 0.0
 
         # 처음 화면 준비
         self.reset()
@@ -259,68 +270,31 @@ class LineTracingCameraEnv(gym.Env):
 
     def build_bezier_track(self, track_id=0):
         """
-        track_id에 따라 서로 다른 베지어 루프 트랙 생성
+        학습 안정성을 위한 부드러운 폐곡선 트랙.
+        기존 Bezier 조합 트랙은 급커브/자기교차 때문에 차선이 꼬이기 쉬움.
         """
 
-        track_segments = [
-            # =========================
-            # Track 0: 현재 성공한 기본 루프
-            # =========================
-            [
-                ((240, 300), (270, 230), (360, 220), (430, 235)),
-                ((430, 235), (520, 250), (610, 270), (620, 330)),
-                ((620, 330), (610, 390), (500, 390), (430, 370)),
-                ((430, 370), (350, 350), (300, 390), (250, 360)),
-                ((250, 360), (190, 330), (200, 290), (240, 300)),
-            ],
+        points = []
 
-            # =========================
-            # Track 1: 조금 더 넓은 루프
-            # =========================
-            [
-                ((230, 310), (260, 230), (370, 210), (450, 235)),
-                ((450, 235), (550, 260), (650, 280), (650, 340)),
-                ((650, 340), (620, 410), (500, 400), (420, 370)),
-                ((420, 370), (330, 340), (280, 400), (230, 360)),
-                ((230, 360), (170, 320), (190, 270), (230, 310)),
-            ],
+        cx, cy = 450, 310
+        rx, ry = 260, 135
 
-            # =========================
-            # Track 2: 아래쪽 굴곡이 조금 다른 루프
-            # =========================
-            [
-                ((250, 290), (300, 220), (390, 230), (460, 250)),
-                ((460, 250), (560, 280), (620, 250), (640, 320)),
-                ((640, 320), (650, 390), (520, 390), (440, 360)),
-                ((440, 360), (360, 330), (300, 370), (240, 350)),
-                ((240, 350), (180, 320), (200, 270), (250, 290)),
-            ],
+        num_points = 240
 
-            # =========================
-            # Track 3: 좌우 변화가 조금 더 있는 루프
-            # =========================
-            [
-                ((240, 310), (280, 240), (360, 220), (430, 250)),
-                ((430, 250), (500, 290), (590, 230), (630, 310)),
-                ((630, 310), (670, 390), (520, 400), (440, 370)),
-                ((440, 370), (350, 340), (310, 410), (250, 360)),
-                ((250, 360), (190, 320), (200, 280), (240, 310)),
-            ],
-        ]
+        for i in range(num_points):
+            t = 2.0 * math.pi * i / num_points
 
-        segments = track_segments[track_id]
+            # 기본 타원 + 약한 굴곡
+            x = cx + rx * math.cos(t)
+            y = cy + ry * math.sin(t)
 
-        track_points = []
+            # 너무 단순한 원형이 되지 않도록 약한 변형
+            x += 35 * math.sin(2 * t)
+            y += 20 * math.sin(3 * t)
 
-        for idx, segment in enumerate(segments):
-            bezier_points = self.cubic_bezier(*segment, num_points=35)
+            points.append((int(x), int(y)))
 
-            if idx > 0:
-                bezier_points = bezier_points[1:]
-
-            track_points.extend(bezier_points)
-
-        return track_points
+        return points
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
@@ -370,6 +344,16 @@ class LineTracingCameraEnv(gym.Env):
         self.car_x = start_x
         self.car_y = start_y
         self.car_angle = start_angle
+
+        # 진행도 계산 초기화
+        self.build_track_progress_table()
+        self.start_progress, self.dist_to_center = self.get_progress_on_track(
+            self.car_x,
+            self.car_y
+        )
+        self.prev_track_progress = self.start_progress
+        self.lap_progress = 0.0
+        self.last_progress_delta = 0.0
 
         # 시작 위치 / 이동거리 기록
         self.start_x = self.car_x
@@ -466,24 +450,127 @@ class LineTracingCameraEnv(gym.Env):
                 start_points.append((float(x), float(y), float(angle)))
 
         return start_points
+    
+    def build_track_progress_table(self):
+        """
+        track_points를 따라 누적 거리 테이블을 만든다.
+        닫힌 루프라서 마지막 점 -> 첫 점 구간도 포함한다.
+        """
+        points = self.track_points
+        cumulative = [0.0]
+        total = 0.0
+
+        for i in range(len(points)):
+            p1 = points[i]
+            p2 = points[(i + 1) % len(points)]
+
+            dx = p2[0] - p1[0]
+            dy = p2[1] - p1[1]
+            seg_len = math.sqrt(dx * dx + dy * dy)
+
+            total += seg_len
+            cumulative.append(total)
+
+            if not self.closed_track and i == len(points) - 2:
+                break
+
+        self.track_cumulative_lengths = cumulative
+        self.track_length = max(total, 1e-6)
+
+    def get_progress_on_track(self, x, y):
+        """
+        현재 자동차 위치를 track 중심선에 투영해서
+        1) track을 따라간 진행 거리 progress
+        2) 중심선으로부터 거리 dist
+        를 반환한다.
+        """
+        if self.track_cumulative_lengths is None:
+            self.build_track_progress_table()
+
+        best_dist_sq = float("inf")
+        best_progress = 0.0
+
+        points = self.track_points
+        n = len(points)
+
+        segment_count = n if self.closed_track else n - 1
+
+        for i in range(segment_count):
+            x1, y1 = points[i]
+            x2, y2 = points[(i + 1) % n]
+
+            vx = x2 - x1
+            vy = y2 - y1
+
+            wx = x - x1
+            wy = y - y1
+
+            seg_len_sq = vx * vx + vy * vy
+            if seg_len_sq < 1e-9:
+                continue
+
+            t = (wx * vx + wy * vy) / seg_len_sq
+            t = np.clip(t, 0.0, 1.0)
+
+            proj_x = x1 + t * vx
+            proj_y = y1 + t * vy
+
+            dx = x - proj_x
+            dy = y - proj_y
+            dist_sq = dx * dx + dy * dy
+
+            if dist_sq < best_dist_sq:
+                seg_len = math.sqrt(seg_len_sq)
+                best_dist_sq = dist_sq
+                best_progress = self.track_cumulative_lengths[i] + t * seg_len
+
+        return best_progress, math.sqrt(best_dist_sq)
+
+    def get_progress_delta(self, new_progress):
+        """
+        닫힌 트랙에서 진행도 차이를 계산한다.
+        마지막 지점에서 시작 지점으로 넘어가는 wrap-around도 처리한다.
+        """
+        delta = new_progress - self.prev_track_progress
+
+        # 한 바퀴 경계 넘어간 경우 보정
+        if delta < -0.5 * self.track_length:
+            delta += self.track_length
+        elif delta > 0.5 * self.track_length:
+            delta -= self.track_length
+
+        # 이상치 방지
+        delta = float(np.clip(delta, -10.0, 10.0))
+
+        return delta
 
     def draw_track(self):
-    # 배경
+        # 배경
         self.screen.fill(self.WHITE)
 
-        # 도로 영역: 어두운 회색으로 넓게 그림
+        # 도로 본체
         pygame.draw.lines(
             self.screen,
-            (60, 60, 60),
+            (55, 55, 55),
             self.closed_track,
             self.track_points,
             self.road_width
         )
 
+        # 도로 중앙선 보조선: 디버깅용
+        # 필요 없으면 이 부분 주석 처리해도 됨
+        pygame.draw.lines(
+            self.screen,
+            (80, 80, 80),
+            self.closed_track,
+            self.track_points,
+            2
+        )
+
         # 왼쪽 차선
         pygame.draw.lines(
             self.screen,
-            (255, 255, 0),
+            self.YELLOW,
             self.closed_track,
             self.left_lane_points,
             self.lane_line_width
@@ -492,7 +579,7 @@ class LineTracingCameraEnv(gym.Env):
         # 오른쪽 차선
         pygame.draw.lines(
             self.screen,
-            (255, 255, 0),
+            self.YELLOW,
             self.closed_track,
             self.right_lane_points,
             self.lane_line_width
@@ -581,11 +668,15 @@ class LineTracingCameraEnv(gym.Env):
 
     def get_lane_observation_from_camera(self, image):
         """
-        카메라 numpy 이미지에서 왼쪽/오른쪽 차선을 감지하고,
-        각 scan line마다 차선 중앙 오차를 observation으로 만든다.
+        카메라 numpy 이미지에서 차선을 감지한다.
+
+        개선점:
+        1. 양쪽 차선이 다 보이면 안쪽 경계 기준으로 중앙 계산
+        2. 한쪽 차선만 보여도 예상 차선폭으로 중앙 추정
+        3. confidence를 너무 약하게 주지 않도록 보정
         """
 
-        img = image  # 이미 [H, W, C] numpy array
+        img = image
 
         h, w, _ = img.shape
         camera_center_x = w / 2
@@ -605,34 +696,60 @@ class LineTracingCameraEnv(gym.Env):
 
         observations = []
 
+        # 카메라 view_width가 get_camera_image()에서 180.0이므로,
+        # road_width 90px는 카메라 이미지 기준 대략 절반 정도
+        expected_lane_width_px = w * (self.road_width / 180.0)
+        expected_lane_width_px = np.clip(expected_lane_width_px, w * 0.25, w * 0.85)
+
         for y in scan_ys:
             xs = np.where(lane_mask[y])[0]
 
-            if len(xs) < 2:
-                observations.append(0.0)  # center_error
-                observations.append(0.0)  # confidence
+            if len(xs) == 0:
+                observations.append(0.0)
+                observations.append(0.0)
                 continue
 
             left_candidates = xs[xs < camera_center_x]
             right_candidates = xs[xs > camera_center_x]
 
-            if len(left_candidates) == 0 or len(right_candidates) == 0:
+            has_left = len(left_candidates) > 0
+            has_right = len(right_candidates) > 0
+
+            if has_left and has_right:
+                # 왼쪽 차선의 안쪽 경계, 오른쪽 차선의 안쪽 경계
+                left_x = np.max(left_candidates)
+                right_x = np.min(right_candidates)
+                confidence = 1.0
+
+            elif has_left:
+                # 왼쪽 차선만 보이면 오른쪽 차선을 예상 폭으로 추정
+                left_x = np.max(left_candidates)
+                right_x = left_x + expected_lane_width_px
+                confidence = 0.45
+
+            elif has_right:
+                # 오른쪽 차선만 보이면 왼쪽 차선을 예상 폭으로 추정
+                right_x = np.min(right_candidates)
+                left_x = right_x - expected_lane_width_px
+                confidence = 0.45
+
+            else:
                 observations.append(0.0)
                 observations.append(0.0)
                 continue
 
-            # 왼쪽 차선은 왼쪽 후보들의 평균보다 max가 더 안정적일 때가 많음
-            left_x = np.mean(left_candidates)
-            right_x = np.mean(right_candidates)
-
-            lane_center_x = (left_x + right_x) / 2
+            lane_center_x = (left_x + right_x) / 2.0
             lane_width_px = right_x - left_x
 
-            center_error = (lane_center_x - camera_center_x) / (w / 2)
+            center_error = (lane_center_x - camera_center_x) / (w / 2.0)
+            center_error = float(np.clip(center_error, -1.0, 1.0))
 
-            # confidence는 차선 폭이 정상적으로 보이면 1에 가깝게
-            lane_width_norm = lane_width_px / w
-            confidence = np.clip(lane_width_norm, 0.0, 1.0)
+            # 차선 폭이 너무 이상하면 confidence 낮춤
+            width_ratio = lane_width_px / max(expected_lane_width_px, 1e-6)
+            width_score = 1.0 - abs(width_ratio - 1.0)
+            width_score = float(np.clip(width_score, 0.2, 1.0))
+
+            confidence = float(np.clip(confidence * width_score, 0.0, 1.0))
 
             observations.append(center_error)
             observations.append(confidence)
@@ -659,37 +776,35 @@ class LineTracingCameraEnv(gym.Env):
         center_errors = obs[0::2]
         confidences = obs[1::2]
 
-        valid = confidences > 0.01
+        valid = confidences > 0.05
 
         if np.sum(valid) == 0:
             self.lane_lost_count += 1
         else:
             self.lane_lost_count = 0
 
-        # 차선을 15 step 연속 못 볼 때만 종료
-        lost_limit = 60
-
-        if self.track_id == 0 and self.start_original_id == 8:
-            lost_limit = 80
+        # 10Hz 기준 2.5초 정도 차선이 안 보이면 종료
+        lost_limit = 25
 
         if self.lane_lost_count >= lost_limit:
             return True
-        
+
         if np.any(valid):
             mean_abs_error = np.mean(np.abs(center_errors[valid]))
-            if mean_abs_error > 1.2:
+
+            # 0.95는 너무 빨리 죽을 수 있어서 1.05로 완화
+            if mean_abs_error > 1.05:
                 return True
 
         return False
+    
 
     def step(self, action):
         """
-        action을 받아서 자동차를 움직임.
-
         action[0] = steering       # -1.0 ~ 1.0
         action[1] = raw_throttle   # -1.0 ~ 1.0
 
-        실제 throttle은 0.0 ~ 1.0으로 변환해서 사용
+        raw_throttle은 내부에서 0.0 ~ 1.0으로 변환한다.
         """
 
         self.step_count += 1
@@ -700,21 +815,28 @@ class LineTracingCameraEnv(gym.Env):
         steering = np.clip(steering, -1.0, 1.0)
         raw_throttle = np.clip(raw_throttle, -1.0, 1.0)
 
+        # 조향 smoothing
         steering = 0.5 * self.prev_steering + 0.5 * steering
 
-        # PPO는 -1~1로 출력하지만, 실제 throttle은 0~1로 변환
+        # PPO 출력 -1~1을 실제 throttle 0~1로 변환
         throttle = (raw_throttle + 1.0) / 2.0
+        throttle = float(np.clip(throttle, 0.0, 1.0))
 
-        if throttle < 0.1:
+        # 저속 판정 강화
+        if throttle < 0.25:
             self.low_speed_count += 1
         else:
             self.low_speed_count = 0
 
-        # steering에 따라 자동차 각도 변경
+        # 자동차 각도 변경
         self.car_angle += steering * self.max_turn_rate * self.dt
 
-        # throttle에 따라 현재 속도 결정
+        # 속도 계산
         self.current_speed = throttle * self.max_speed
+
+        # 이동 전 위치
+        old_x = self.car_x
+        old_y = self.car_y
 
         # 자동차 이동
         rad = math.radians(self.car_angle)
@@ -723,15 +845,29 @@ class LineTracingCameraEnv(gym.Env):
         self.car_y += math.sin(rad) * self.current_speed * self.dt
 
         step_distance = math.sqrt(
-            (self.car_x - self.prev_x) ** 2 +
-            (self.car_y - self.prev_y) ** 2
+            (self.car_x - old_x) ** 2 +
+            (self.car_y - old_y) ** 2
         )
 
         self.last_step_distance = step_distance
-
         self.total_distance += step_distance
+
         self.prev_x = self.car_x
         self.prev_y = self.car_y
+
+        # 트랙 진행도 계산
+        current_progress, self.dist_to_center = self.get_progress_on_track(
+            self.car_x,
+            self.car_y
+        )
+
+        self.last_progress_delta = self.get_progress_delta(current_progress)
+
+        # 앞으로 간 경우만 누적 진행도에 더함
+        if self.last_progress_delta > 0:
+            self.lap_progress += self.last_progress_delta
+
+        self.prev_track_progress = current_progress
 
         # 화면 다시 그림
         self.screen.fill(self.WHITE)
@@ -744,58 +880,87 @@ class LineTracingCameraEnv(gym.Env):
         # reward 계산
         reward = self.calculate_reward(steering, throttle)
 
-        #lane 관련
+        # lane 관련 info
         lane_obs_len = self.lane_scan_rows * 2
         lane_obs = self.last_lane_observation[:lane_obs_len]
         confidences = lane_obs[1::2]
-        valid_count = int(np.sum(confidences > 0.01))
+        valid_count = int(np.sum(confidences > 0.05))
 
-        # 다음 reward 계산을 위해 저장
-        self.prev_steering = steering
-
-        # 종료 조건
         terminated = False
         truncated = False
         done_reason = "none"
 
-        #finish_line_x = 830.0
+        # =========================
+        # 종료 조건
+        # =========================
 
-        # 1. finish는 off_track보다 먼저 검사
-        #if self.car_x >= finish_line_x:
+        # 1. 완주 종료
+        #if self.lap_progress >= self.track_length * 0.95 and self.step_count > 50:
         #    terminated = True
-        #    reward += 20.0
-        #    done_reason = "finish"
-        
+        #    reward += 300.0
+        #   done_reason = "lap_complete"
+
         # 2. 저속 종료
-        if self.low_speed_count >= 30:
+        if self.low_speed_count >= 35:
             terminated = True
-            reward -= 5.0
+            reward -= 80.0
             done_reason = "low_speed"
 
-        # 3. 선 이탈 종료
+        # 3. 실제 트랙 중심선 기준 이탈
+        # 기존 0.65는 살짝 빡셈. 일단 0.80으로 완화.
+
+        elif self.dist_to_center > self.road_width * 0.80:
+            terminated = True
+
+            # 그냥 -35는 너무 약함.
+            # 실패 에피소드가 200점 받는 걸 막기 위해 강한 패널티.
+            remaining_ratio = 1.0 - np.clip(
+                self.lap_progress / max(self.track_length, 1e-6),
+                0.0,
+                1.0
+            )
+
+            reward -= 180.0
+            reward -= remaining_ratio * 80.0
+
+            done_reason = "off_road_geometry"
+
+        # 4. 카메라 차선 감지 기준 이탈
         elif self.is_off_road_by_lane_detection():
             terminated = True
-            reward -= 25.0
-            done_reason = "off_road"
 
-        # 4. 화면 밖 종료
+            remaining_ratio = 1.0 - np.clip(
+                self.lap_progress / max(self.track_length, 1e-6),
+                0.0,
+                1.0
+            )
+
+            reward -= 150.0
+            reward -= remaining_ratio * 60.0
+
+            done_reason = "off_road_lane"
+
+        # 5. 화면 밖 종료
         elif self.car_x < 0 or self.car_x > self.width:
             terminated = True
-            reward -= 6.0
+            reward -= 180.0
             done_reason = "x_out"
 
         elif self.car_y < 0 or self.car_y > self.height:
             terminated = True
-            reward -= 6.0
+            reward -= 180.0
             done_reason = "y_out"
 
-        # 5. 최대 step 도달
+        # 6. 최대 step 도달
         if self.step_count >= self.max_steps:
             truncated = True
             done_reason = "max_steps"
-        
+
+        # 다음 step용 steering 저장
+        self.prev_steering = steering
+
         distance_from_start = math.sqrt(
-            (self.car_x - self.start_x) ** 2 + 
+            (self.car_x - self.start_x) ** 2 +
             (self.car_y - self.start_y) ** 2
         )
 
@@ -810,6 +975,11 @@ class LineTracingCameraEnv(gym.Env):
             "done_reason": done_reason,
             "distance_from_start": distance_from_start,
             "total_distance": self.total_distance,
+            "track_progress": current_progress,
+            "last_progress_delta": self.last_progress_delta,
+            "lap_progress": self.lap_progress,
+            "track_length": self.track_length,
+            "dist_to_center": self.dist_to_center,
             "start_original_id": self.start_original_id,
             "track_id": self.track_id,
             "valid_lane_rows": valid_count,
@@ -824,45 +994,92 @@ class LineTracingCameraEnv(gym.Env):
         center_errors = obs[0::2]
         confidences = obs[1::2]
 
-        valid = confidences > 0.01
+        valid = confidences > 0.05
         valid_count = int(np.sum(valid))
         valid_ratio = valid_count / len(confidences)
 
-        # 차선을 하나도 못 보면 손해
+        reward = 0.0
+
+        # =========================
+        # 1. 진행도 보상
+        # 너무 크게 주면 박아도 고득점이 되므로 낮춤
+        # =========================
+        progress = self.last_progress_delta
+
+        if progress > 0:
+            reward += progress * 0.10
+        else:
+            # 뒤로 가는 것은 더 강하게 손해
+            reward += progress * 0.40
+
+        # =========================
+        # 2. 도로 중심선 거리 패널티
+        # 중심선에서 멀어질수록 계속 손해
+        # =========================
+        center_dist_ratio = self.dist_to_center / max(self.road_width / 2.0, 1e-6)
+
+        # 도로 중앙 근처: 거의 패널티 없음
+        # 차선 근처/바깥쪽: 빠르게 패널티 증가
+        if center_dist_ratio > 0.4:
+            reward -= ((center_dist_ratio - 0.4) ** 2) * 1.2
+
+        # 도로 바깥에 가까우면 매 step 강한 경고
+        if center_dist_ratio > 0.9:
+            reward -= 1.0
+
+        # =========================
+        # 3. 차선을 아예 못 보면 강한 패널티
+        # =========================
         if valid_count == 0:
-            reward = -0.8
-            reward -= throttle * 0.2
-            reward -= min(self.lane_lost_count * 0.03, 0.8)
-            return reward
+            reward -= 1.5
+            reward -= throttle * 0.8
+            reward -= min(self.lane_lost_count * 0.08, 1.5)
+            return float(reward)
 
         valid_errors = center_errors[valid]
-        mean_abs_error = np.mean(np.abs(valid_errors))
+        mean_abs_error = float(np.mean(np.abs(valid_errors)))
 
         center_score = 1.0 - np.clip(mean_abs_error, 0.0, 1.0)
 
-        reward = 0.0
+        # =========================
+        # 4. 중앙 유지 보상
+        # 기존보다 약하게.
+        # 주행 보조용이지 메인 보상이 아님.
+        # =========================
+        reward += center_score * valid_ratio * 0.35
 
-        # 1. 차선을 많이 볼수록 보상
-        reward += valid_ratio * 1.0
+        # =========================
+        # 5. 차선이 많이 보이면 약간 보상
+        # =========================
+        reward += valid_ratio * 0.20
 
-        # 2. 차선 중앙에 가까울수록 보상
-        reward += center_score * 0.8
-
-        # 3. 차선을 어느 정도 보고 있을 때만 속도 보상
-        if valid_count >= 3 and mean_abs_error < 0.5:
+        # =========================
+        # 6. 속도 보상
+        # 중앙에 있을 때만 속도 보상.
+        # 삐딱한 상태에서 밟으면 손해.
+        # =========================
+        if valid_count >= 5 and mean_abs_error < 0.35 and center_dist_ratio < 0.75:
             reward += throttle * 0.25
         else:
-            reward -= throttle * 0.15
+            reward -= throttle * 0.35
 
-        # 4. 과도한 조향만 살짝 패널티
-        reward -= abs(steering) * 0.08
+        # =========================
+        # 7. 조향 패널티
+        # 너무 크게 꺾는 것보다 부드러운 조향 유도
+        # =========================
+        reward -= abs(steering) * 0.05
 
-        # 5. 조향 변화 패널티도 약하게
         steer_change = abs(steering - self.prev_steering)
-        reward -= steer_change * 0.05
+        reward -= steer_change * 0.04
 
-        return reward
+        # =========================
+        # 8. 너무 느린 행동 방지
+        # =========================
+        if throttle < 0.25:
+            reward -= 0.25
 
+        return float(reward)
+    
     def render(self):
         """
         화면에 자동차, 방향, 가상 카메라 영역을 그림
