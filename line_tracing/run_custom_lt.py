@@ -1,6 +1,7 @@
 import pygame
 import torch
 import numpy as np
+import environment
 
 from environment import LineTracingCameraEnv
 from lt_ppo import ActorCritic
@@ -11,6 +12,8 @@ MODEL_PATH = "custom_ppo_line_tracing.pt"
 
 
 def main():
+    print("import된 environment 파일:", environment.__file__)
+
     env = LineTracingCameraEnv(render_mode=True)
 
     obs_dim = env.observation_space.shape[0]

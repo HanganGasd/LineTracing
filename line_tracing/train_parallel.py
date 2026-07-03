@@ -5,7 +5,7 @@ from torch.distributions import Normal
 from collections import deque, defaultdict
 
 from environment import LineTracingCameraEnv
-from custom_ppo import ActorCritic
+from lt_ppo import ActorCritic
 
 
 # =========================
