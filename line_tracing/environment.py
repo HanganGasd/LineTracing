@@ -115,6 +115,23 @@ class LineTracingCameraEnv(gym.Env):
         # 실제 라즈베리파이 카메라가 본다고 가정하는 영역 크기
         self.camera_width = 160
         self.camera_height = 120
+        self.camera_near_dist = 5.0
+        self.camera_far_dist = 135.0
+        self.camera_view_width = 180.0
+        camera_xs = np.linspace(
+            -self.camera_view_width / 2.0,
+            self.camera_view_width / 2.0,
+            self.camera_width,
+        )
+        camera_ys = np.linspace(
+            self.camera_far_dist,
+            self.camera_near_dist,
+            self.camera_height,
+        )
+        self._camera_local_x, self._camera_local_y = np.meshgrid(
+            camera_xs,
+            camera_ys,
+        )
 
         # 자동차 앞쪽 몇 px 떨어진 지점을 카메라 중심으로 볼 것인지
         self.camera_distance = 60
@@ -123,6 +140,13 @@ class LineTracingCameraEnv(gym.Env):
         # 예: 16칸이면 화면 가로를 16등분해서 각 칸에 선이 있는지 확인
         self.observation_bins = 16
         self.observation_rows = 3
+        self._observation_bin_width = self.camera_width // self.observation_bins
+        self._observation_bin_starts = (
+            np.arange(self.observation_bins) * self._observation_bin_width
+        )
+        self._observation_bin_widths = np.diff(
+            np.append(self._observation_bin_starts, self.camera_width)
+        )
 
         # Gymnasium space 설정
         # =========================
@@ -593,9 +617,6 @@ class LineTracingCameraEnv(gym.Env):
         screen_array = pygame.surfarray.array3d(self.screen)
         screen_array = np.transpose(screen_array, (1, 0, 2))
 
-        h = self.camera_height
-        w = self.camera_width
-
         rad = math.radians(self.car_angle)
 
         # 차량 진행 방향 벡터
@@ -606,30 +627,17 @@ class LineTracingCameraEnv(gym.Env):
         right_x = -math.sin(rad)
         right_y = math.cos(rad)
 
-        # 카메라 시야 설정
-        near_dist = 5.0
-        far_dist = 135.0
-        view_width = 180.0
-
-        # 카메라 이미지 좌표 생성
-        xs = np.linspace(-view_width / 2.0, view_width / 2.0, w)
-
-        # 이미지 위쪽이 먼 곳, 아래쪽이 가까운 곳
-        ys = np.linspace(far_dist, near_dist, h)
-
-        local_x, local_y = np.meshgrid(xs, ys)
-
         # 차량 기준 local 좌표 -> 월드 좌표
         map_x = (
             self.car_x
-            + forward_x * local_y
-            + right_x * local_x
+            + forward_x * self._camera_local_y
+            + right_x * self._camera_local_x
         ).astype(np.float32)
 
         map_y = (
             self.car_y
-            + forward_y * local_y
-            + right_y * local_x
+            + forward_y * self._camera_local_y
+            + right_y * self._camera_local_x
         ).astype(np.float32)
 
         camera_image = cv2.remap(
@@ -673,7 +681,6 @@ class LineTracingCameraEnv(gym.Env):
         """
         h, w = binary.shape
 
-        bin_width = w // self.observation_bins
         row_height = h // self.observation_rows
 
         observation = []
@@ -699,18 +706,15 @@ class LineTracingCameraEnv(gym.Env):
 
             row_centers.append(row_center)
 
-            for i in range(self.observation_bins):
-                start_x = i * bin_width
-
-                if i == self.observation_bins - 1:
-                    end_x = w
-                else:
-                    end_x = (i + 1) * bin_width
-
-                roi = binary[start_y:end_y, start_x:end_x]
-
-                black_ratio = np.sum(roi > 0) / roi.size
-                observation.append(black_ratio)
+            column_counts = np.count_nonzero(row_binary, axis=0)
+            counts = np.add.reduceat(
+                column_counts,
+                self._observation_bin_starts,
+            )
+            ratios = counts / (
+                row_binary.shape[0] * self._observation_bin_widths
+            )
+            observation.extend(ratios.tolist())
 
         observation.extend(row_centers)
 
