@@ -5,15 +5,24 @@ import gymnasium as gym
 import cv2
 from gymnasium import spaces
 
+from driving.procedural import CameraDomainRandomizer, generate_closed_track
+
 
 class LaneKeepingEnv(gym.Env):
 
-    def __init__(self, render_mode=True):
+    def __init__(
+        self,
+        render_mode=True,
+        *,
+        procedural_tracks=True,
+        domain_randomization=False,
+    ):
         super().__init__()
         pygame.init()
         self.low_speed_count = 0
         self.prev_steering = 0.0
         self.road_width = 90
+        self.vehicle_radius = 13
         self.lane_line_width = 5
         self.lane_lost_count = 0
         
@@ -47,6 +56,11 @@ class LaneKeepingEnv(gym.Env):
         # 트랙 / 자동차 시작점 설정
         # =========================
         self.closed_track = True
+        self.procedural_tracks = procedural_tracks
+        self.domain_randomizer = CameraDomainRandomizer(
+            enabled=domain_randomization
+        )
+        self._track_sequence = 0
 
         self.available_tracks = [0]
         self.num_tracks = len(self.available_tracks)
@@ -291,6 +305,15 @@ class LaneKeepingEnv(gym.Env):
         기존 Bezier 조합 트랙은 급커브/자기교차 때문에 차선이 꼬이기 쉬움.
         """
 
+        if self.procedural_tracks:
+            rng = getattr(self, "np_random", np.random.default_rng())
+            return generate_closed_track(
+                rng,
+                width=self.width,
+                height=self.height,
+                margin=105.0,
+            )
+
         points = []
 
         cx, cy = 450, 310
@@ -315,9 +338,11 @@ class LaneKeepingEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        self.domain_randomizer.reset(self.np_random)
+        self._track_sequence += 1
 
         # 매 에피소드마다 트랙 랜덤 선택
-        self.track_id = np.random.choice(self.available_tracks)
+        self.track_id = self._track_sequence
         self.track_points = self.build_bezier_track(self.track_id)
         self.lane_lost_count = 0
         self.last_step_distance = 0.0
@@ -349,7 +374,9 @@ class LaneKeepingEnv(gym.Env):
         if self.track_id == 0 and 8 in self.start_original_ids and np.random.rand() < 0.3:
             self.start_id = self.start_original_ids.index(8)
         else:
-            self.start_id = np.random.randint(len(self.start_points))
+            self.start_id = int(
+                self.np_random.integers(len(self.start_points))
+            )
 
         self.start_original_id = self.start_original_ids[self.start_id]
         self.start_original_id = self.start_original_ids[self.start_id]
@@ -665,7 +692,7 @@ class LaneKeepingEnv(gym.Env):
             borderValue=self.WHITE
         )
 
-        return camera_image
+        return self.domain_randomizer.apply(camera_image, self.np_random)
 
     def get_lane_observation_from_camera(self, image):
         """
@@ -910,7 +937,9 @@ class LaneKeepingEnv(gym.Env):
         # 3. 실제 트랙 중심선 기준 이탈
         # 기존 0.65는 살짝 빡셈. 일단 0.80으로 완화.
 
-        elif self.dist_to_center > self.road_width * 0.80:
+        elif self.dist_to_center > (
+            self.road_width / 2.0 - self.vehicle_radius
+        ):
             terminated = True
 
             # 그냥 -35는 너무 약함.

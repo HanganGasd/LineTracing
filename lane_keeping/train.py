@@ -10,7 +10,13 @@ MODEL_PATH = model_path(__file__, "camera_ppo_lane_keeping_v2.pt")
 
 
 def make_env() -> TrainingCameraWrapper:
-    return TrainingCameraWrapper(LaneKeepingEnv(render_mode=False))
+    return TrainingCameraWrapper(
+        LaneKeepingEnv(
+            render_mode=False,
+            procedural_tracks=True,
+            domain_randomization=True,
+        )
+    )
 
 
 if __name__ == "__main__":

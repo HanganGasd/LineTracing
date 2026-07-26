@@ -83,7 +83,7 @@ class TrainingCameraWrapper(CameraObservationWrapper):
         base = self.env.unwrapped
         if self._task == "lane":
             distance = float(base.dist_to_center)
-            allowed = max(base.road_width * 0.8, 1e-6)
+            allowed = max(base.road_width / 2.0, 1e-6)
         else:
             distance = float(
                 base.get_distance_to_track_center(base.car_x, base.car_y)
@@ -117,7 +117,7 @@ class TrainingCameraWrapper(CameraObservationWrapper):
         center_score = max(0.0, 1.0 - center_error)
 
         reward = progress
-        reward += 0.20 * throttle * center_score
+        reward += 0.08 * throttle * center_score
         reward -= 0.15 * center_error * center_error
         reward -= 0.02 * abs(steering)
         reward -= 0.04 * abs(steering - previous_steering)
@@ -130,7 +130,14 @@ class TrainingCameraWrapper(CameraObservationWrapper):
             elif reason == "low_speed":
                 reward -= 3.0
             else:
-                reward -= 10.0
+                survival_ratio = float(
+                    np.clip(
+                        base.step_count / max(base.max_steps, 1),
+                        0.0,
+                        1.0,
+                    )
+                )
+                reward -= 10.0 - 5.0 * survival_ratio
         return float(np.clip(reward, -10.0, 10.0))
 
     @staticmethod

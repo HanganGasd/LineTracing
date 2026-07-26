@@ -5,10 +5,18 @@ import cv2
 import gymnasium as gym
 from gymnasium import spaces
 
+from driving.procedural import CameraDomainRandomizer, generate_closed_track
+
 
 class LineTracingCameraEnv(gym.Env):
 
-    def __init__(self, render_mode=False):
+    def __init__(
+        self,
+        render_mode=False,
+        *,
+        procedural_tracks=True,
+        domain_randomization=False,
+    ):
         super().__init__()
         pygame.init()
         self.low_speed_count = 0
@@ -16,8 +24,8 @@ class LineTracingCameraEnv(gym.Env):
         
         # 라인트레이싱 선 설정
         self.line_width = 8
-        self.off_line_margin = 6
-        self.off_line_limit = 5
+        self.off_line_margin = 4
+        self.off_line_limit = 3
 
         self.min_black_ratio = 0.008
         self.line_lost_limit = 8
@@ -63,6 +71,11 @@ class LineTracingCameraEnv(gym.Env):
         # 트랙 / 자동차 시작점 설정
         # =========================
         self.closed_track = True
+        self.procedural_tracks = procedural_tracks
+        self.domain_randomizer = CameraDomainRandomizer(
+            enabled=domain_randomization
+        )
+        self._track_sequence = 0
 
         self.available_tracks = [0,1,2,3,4,5,6,7]
         self.num_tracks = len(self.available_tracks)
@@ -207,6 +220,15 @@ class LineTracingCameraEnv(gym.Env):
         track_id에 따라 서로 다른 베지어 루프 트랙 생성
         """
 
+        if self.procedural_tracks:
+            rng = getattr(self, "np_random", np.random.default_rng())
+            return generate_closed_track(
+                rng,
+                width=self.width,
+                height=self.height,
+                margin=75.0,
+            )
+
         track_segments = [
             # =========================
             # Track 0: 현재 성공한 기본 루프
@@ -307,9 +329,11 @@ class LineTracingCameraEnv(gym.Env):
 
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
+        self.domain_randomizer.reset(self.np_random)
+        self._track_sequence += 1
 
         # 매 에피소드마다 트랙 랜덤 선택
-        self.track_id = np.random.choice(self.available_tracks)
+        self.track_id = self._track_sequence
         self.track_points = self.build_bezier_track(self.track_id)
 
         all_start_points = self.generate_start_points_by_interval(interval=20)
@@ -339,7 +363,7 @@ class LineTracingCameraEnv(gym.Env):
         self.line_lost_count = 0
 
         # 시작점 하나만 랜덤 선택
-        self.start_id = np.random.randint(len(self.start_points))
+        self.start_id = int(self.np_random.integers(len(self.start_points)))
         self.start_original_id = self.start_original_ids[self.start_id]
 
         start_x, start_y, start_angle = self.start_points[self.start_id]
@@ -649,7 +673,7 @@ class LineTracingCameraEnv(gym.Env):
             borderValue=self.WHITE
         )
 
-        return camera_image
+        return self.domain_randomizer.apply(camera_image, self.np_random)
 
     def preprocess_camera_image(self, image):
         """
